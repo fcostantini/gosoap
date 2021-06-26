@@ -24,6 +24,12 @@ type SoapParams interface{}
 type Params map[string]interface{}
 type ArrayParams [][2]interface{}
 
+type NamespaceParam struct {
+	Name      string
+	Namespace string
+	Value     interface{}
+}
+
 type DumpLogger interface {
 	LogRequest(method string, dump []byte)
 	LogResponse(method string, dump []byte)
@@ -41,13 +47,14 @@ func (l *fmtLogger) LogResponse(method string, dump []byte) {
 
 // Config config the Client
 type Config struct {
-	Dump   bool
-	Logger DumpLogger
+	Dump        bool
+	HasRedirect bool
+	Logger      DumpLogger
 }
 
 // SoapClient return new *Client to handle the requests with the WSDL
-func SoapClient(wsdl string, httpClient *http.Client) (*Client, error) {
-	return SoapClientWithConfig(wsdl, httpClient, &Config{Dump: false, Logger: &fmtLogger{}})
+func SoapClient(wsdl string, httpClient *http.Client, verbose, hasRedirect bool) (*Client, error) {
+	return SoapClientWithConfig(wsdl, httpClient, &Config{Dump: verbose, HasRedirect: hasRedirect, Logger: &fmtLogger{}})
 }
 
 // SoapClientWithConfig return new *Client to handle the requests with the WSDL
@@ -97,9 +104,9 @@ type Client struct {
 	config               *Config
 }
 
-// Call call's the method m with Params p
-func (c *Client) Call(m string, p SoapParams) (res *Response, err error) {
-	return c.Do(NewRequest(m, p))
+// Call call's the method m with Params p using namespace n
+func (c *Client) Call(m, n string, p SoapParams) (res *Response, err error) {
+	return c.Do(NewRequest(m, n, p))
 }
 
 // CallByStruct call's by struct
@@ -182,7 +189,12 @@ func (c *Client) Do(req *Request) (res *Response, err error) {
 		return nil, err
 	}
 
-	b, err := p.doRequest(c.Definitions.Services[0].Ports[0].SoapAddresses[0].Location)
+	location := c.Definitions.Services[0].Ports[0].SoapAddresses[0].Location
+	if c.config.HasRedirect {
+		location = location[:4] + "s" + location[4:]
+	}
+
+	b, err := p.doRequest(location)
 	if err != nil {
 		return nil, ErrorWithPayload{err, p.Payload}
 	}
@@ -224,14 +236,6 @@ func (p *process) doRequest(url string) ([]byte, error) {
 		return nil, err
 	}
 
-	if p.Client.config != nil && p.Client.config.Dump {
-		dump, err := httputil.DumpRequestOut(req, true)
-		if err != nil {
-			return nil, err
-		}
-		p.Client.config.Logger.LogRequest(p.Request.Method, dump)
-	}
-
 	if p.Client.Username != "" && p.Client.Password != "" {
 		req.SetBasicAuth(p.Client.Username, p.Client.Password)
 	}
@@ -241,6 +245,14 @@ func (p *process) doRequest(url string) ([]byte, error) {
 	req.Header.Add("Content-Type", "text/xml;charset=UTF-8")
 	req.Header.Add("Accept", "text/xml")
 	req.Header.Add("SOAPAction", p.SoapAction)
+
+	if p.Client.config != nil && p.Client.config.Dump {
+		dump, err := httputil.DumpRequestOut(req, true)
+		if err != nil {
+			return nil, err
+		}
+		p.Client.config.Logger.LogRequest(p.Request.Method, dump)
+	}
 
 	resp, err := p.httpClient().Do(req)
 	if err != nil {

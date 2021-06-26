@@ -4,10 +4,11 @@ import (
 	"encoding/xml"
 	"fmt"
 	"reflect"
+	"strconv"
 )
 
 var (
-	soapPrefix = "soap"
+	soapPrefix                            = "soap"
 	customEnvelopeAttrs map[string]string = nil
 )
 
@@ -20,37 +21,37 @@ func SetCustomEnvelope(prefix string, attrs map[string]string) {
 }
 
 // MarshalXML envelope the body and encode to xml
-func (c process) MarshalXML(e *xml.Encoder, _ xml.StartElement) error {
+func (p process) MarshalXML(e *xml.Encoder, _ xml.StartElement) error {
 	tokens := &tokenData{}
 
 	//start envelope
-	if c.Client.Definitions == nil {
+	if p.Client.Definitions == nil {
 		return fmt.Errorf("definitions is nil")
 	}
 
 	namespace := ""
-	if c.Client.Definitions.Types != nil {
-		namespace = c.Client.Definitions.Types[0].XsdSchema[0].TargetNamespace
+	if p.Client.Definitions.Types != nil {
+		namespace = p.Client.Definitions.Types[0].XsdSchema[0].TargetNamespace
 	}
 
 	tokens.startEnvelope()
-	if len(c.Client.HeaderParams) > 0 {
-		tokens.startHeader(c.Client.HeaderName, namespace)
+	if len(p.Client.HeaderParams) > 0 {
+		tokens.startHeader(p.Client.HeaderName, namespace)
 
-		tokens.recursiveEncode(c.Client.HeaderParams)
+		tokens.recursiveEncode(p.Client.HeaderParams)
 
-		tokens.endHeader(c.Client.HeaderName)
+		tokens.endHeader(p.Client.HeaderName)
 	}
 
-	err := tokens.startBody(c.Request.Method, namespace)
+	err := tokens.startBody(p.Request.Method, namespace, p.Request.Namespace)
 	if err != nil {
 		return err
 	}
 
-	tokens.recursiveEncode(c.Request.Params)
+	tokens.recursiveEncode(p.Request.Params)
 
 	//end envelope
-	tokens.endBody(c.Request.Method)
+	tokens.endBody(p.Request.Method, p.Request.Namespace)
 	tokens.endEnvelope()
 
 	for _, t := range tokens.data {
@@ -69,8 +70,19 @@ type tokenData struct {
 
 func (tokens *tokenData) recursiveEncode(hm interface{}) {
 	v := reflect.ValueOf(hm)
-
 	switch v.Kind() {
+	case reflect.Struct:
+		if np, ok := hm.(NamespaceParam); ok {
+			t := xml.StartElement{
+				Name: xml.Name{
+					Space: "",
+					Local: fmt.Sprintf("%s:%s", np.Namespace, np.Name),
+				},
+			}
+			tokens.data = append(tokens.data, t)
+			tokens.recursiveEncode(np.Value)
+			tokens.data = append(tokens.data, xml.EndElement{Name: t.Name})
+		}
 	case reflect.Map:
 		for _, key := range v.MapKeys() {
 			t := xml.StartElement{
@@ -105,6 +117,9 @@ func (tokens *tokenData) recursiveEncode(hm interface{}) {
 	case reflect.String:
 		content := xml.CharData(v.String())
 		tokens.data = append(tokens.data, content)
+	case reflect.Int:
+		content := xml.CharData(strconv.Itoa(int(v.Int())))
+		tokens.data = append(tokens.data, content)
 	}
 }
 
@@ -126,7 +141,7 @@ func (tokens *tokenData) startEnvelope() {
 		e.Attr = make([]xml.Attr, 0)
 		for local, value := range customEnvelopeAttrs {
 			e.Attr = append(e.Attr, xml.Attr{
-				Name: xml.Name{Space: "", Local: local},
+				Name:  xml.Name{Space: "", Local: local},
 				Value: value,
 			})
 		}
@@ -197,7 +212,7 @@ func (tokens *tokenData) endHeader(m string) {
 	tokens.data = append(tokens.data, r, h)
 }
 
-func (tokens *tokenData) startBody(m, n string) error {
+func (tokens *tokenData) startBody(m, n, pn string) error {
 	b := xml.StartElement{
 		Name: xml.Name{
 			Space: "",
@@ -209,14 +224,25 @@ func (tokens *tokenData) startBody(m, n string) error {
 		return fmt.Errorf("method or namespace is empty")
 	}
 
-	r := xml.StartElement{
-		Name: xml.Name{
-			Space: "",
-			Local: m,
-		},
-		Attr: []xml.Attr{
-			{Name: xml.Name{Space: "", Local: "xmlns"}, Value: n},
-		},
+	var r xml.StartElement
+
+	if pn != "" {
+		r = xml.StartElement{
+			Name: xml.Name{
+				Space: "",
+				Local: fmt.Sprintf("%s:%s", pn, m),
+			},
+		}
+	} else {
+		r = xml.StartElement{
+			Name: xml.Name{
+				Space: "",
+				Local: m,
+			},
+			Attr: []xml.Attr{
+				{Name: xml.Name{Space: "", Local: "xmlns"}, Value: n},
+			},
+		}
 	}
 
 	tokens.data = append(tokens.data, b, r)
@@ -225,7 +251,7 @@ func (tokens *tokenData) startBody(m, n string) error {
 }
 
 // endToken close body of the envelope
-func (tokens *tokenData) endBody(m string) {
+func (tokens *tokenData) endBody(m, np string) {
 	b := xml.EndElement{
 		Name: xml.Name{
 			Space: "",
@@ -233,10 +259,16 @@ func (tokens *tokenData) endBody(m string) {
 		},
 	}
 
+	local := m
+
+	if np != "" {
+		local = fmt.Sprintf("%s:%s", np, m)
+	}
+
 	r := xml.EndElement{
 		Name: xml.Name{
 			Space: "",
-			Local: m,
+			Local: local,
 		},
 	}
 
